@@ -1,0 +1,175 @@
+var geometric = function(p) {
+  var drift = function(prevVal) {
+    return Uniform({a:Math.max(0,prevVal-1), b:prevVal+1})
+  }
+  return Math.floor(sample(Exponential({a:-Math.log(1-p)}), {driftKernel:drift}))
+}
+
+var score_geometric = function(p, k) {
+  return Math.log(p) + k * Math.log(1-p)
+}
+
+var map_linear = function(f, l, _i) {
+  /*
+    Same semantics as map
+    Preserves order when list changes length during MCMC
+    TODO: Should be able to make this logarithmic rather than linear time
+  */
+  var i = _i==undefined ? 0 : _i
+  if(l.length==i) {
+    return []
+  } else {
+    return [f(l[i])].concat(map_linear(f, l, i+1))
+  }
+}
+
+var repeat_geometric = function(p, f) {
+  /*
+     Returns x = [f(id0), f(id1), ...]
+     such that x.length ~ geom(p) on {0, 1, ...}
+     Allows MCMC proposals to add/delete arbitrary elements (not just push/pop)
+  */
+  var pEnd = 1 / (1 + 2*(1-p)/p)
+  var pReal = (1-pEnd)/2
+  var pNull = pReal
+  
+  var nEntries = geometric(pEnd)
+  var entries = map_linear(function(i){
+    var include_entry = flip()
+    return include_entry ? f(i) : null
+  }, _.range(nEntries))
+  
+  return filter(function(x){x != null}, entries)
+}
+
+
+
+var mixture = function(sampleParams, sampleElement, unfactor) {
+  /*
+  Samples a mixture distribution, where:
+    | nComponents ~ Geometric(pComponents)
+    | For each component:
+    |    params = sampleParams()
+    |    nElements ~ Geometric(pElements)
+    |    elements = repeat(nElements, sampleElement)
+  Returns a list of components as [{params, elements}, ...]
+  
+  Parameters:
+  - sampleParams is a thunk which samples parameters for a mixture component
+  - sampleElement is a thunk which samples an element
+  - if unfactor=true, scores for nComponents and nElements are removed from trace
+  
+  All elements in all components are sampled i.i.d from sampleElement. To make
+  elements depend on their component's params, use factor to reweight the samples
+  (see example below). Use the same technique if you want a different distribution
+  for nComponents or nElements (unfactor=true automatically subtracts their scores
+  from the trace).
+  
+  The function is written 'backwards', so that elements are sampled before being
+  assigned to mixture components. This leads to single-site Metropolis-Hastings
+  proposals which:
+    - Add a new element
+    - Remove any element
+    - Reassign an element to a new mixture component
+  Factor statements reweight the trace to restore the semantics of the forward model
+  */
+  
+  var pComponents = 0.5
+  var pElements = 0.5
+  var qComponents = 0.5 //only affects initialisation
+  var qElements = 0.5 //only affects initialisation
+    
+  var componentParams = _.fromPairs(repeat_geometric(qComponents, function(id) { 
+    return [id, sampleParams()]
+  })) // id => component
+  var component_ids = _.keys(componentParams)
+  
+  var _elements = component_ids.length==0 ? [] : repeat_geometric(qElements, function() { 
+    return {component_id:sample(Categorical({vs:component_ids})),
+            value:sampleElement()}
+  })
+
+  var components = map_linear(function(component_id){
+    var params = componentParams[component_id]
+    var elements = filter(function(element) {
+      element.component_id==component_id}, _elements)
+    return {params, elements:map(function(e){return e.value}, elements)}
+  }, component_ids)
+    
+  // Factor out Q(nComponents, nElements_i for all i)
+  var q = score_geometric(qComponents, component_ids.length) +
+          (component_ids.length==0 ? 0 : 
+            score_geometric(qElements, _elements.length) +
+            _elements.length * -Math.log(component_ids.length) +
+            numeric.lnfact(_elements.length) -
+            sum(map(function(c){numeric.lnfact(c.elements.length)}, components))
+          )
+  factor(-q)
+  
+  if(!unfactor) {
+    // Factor in P(nComponents, nElements_i for all i)
+    var p = score_geometric(pComponents, component_ids.length) +
+        sum(map(function(component) {
+          score_geometric(pElements, component.elements.length)
+        }, components))
+    factor(p)
+  }
+
+  return components
+}
+
+
+
+
+
+
+
+/*------------------ Example usage -----------------------
+We want to generate samples from a model where:
+    | nComponents ~ RandomInteger({n:5})
+    | For each component:
+    |    p ~ Uniform(0, 1)
+    |    nElements ~ Geometric(0.25)
+    |    element_i ~ Bernoulli(p) for i = 1..nElements
+
+To do this, we first sample from the i.i.d Geometric model (by calling mixture) and
+then reweight the samples
+-----------------------------------------------------------*/
+
+var sampleParams = function() {
+  return {p:uniform({a:0, b:1})}
+}
+
+var sampleElement = function() {
+  // Guide distribution for elements is independent of mixture component
+  var element = sample(Bernoulli({p:0.5}))
+  factor(-Bernoulli({p:0.5}).score(element)) //factor out guide
+  return element
+}
+
+var dist = Infer({method:"MCMC", lag:10, samples:20000, callbacks:[wpEditor.MCMCProgress()]}, function(){
+  var components = mixture(sampleParams, sampleElement, true)
+  
+  //----- Rescore under the distribution we want to sample from ------
+  //No need to factor out the original distribution, as we used unfactor=true
+  //and already factored out scores in sampleElement
+
+  //nComponents ~ RandomInteger({n:5})
+  factor(RandomInteger({n:5}).score(components.length))
+  
+  map(function(component) {
+    //nElements ~ Geometric(0.25)
+    factor(score_geometric(0.25, component.elements.length))
+    
+    // element ~ Bernoulli(params.p)
+    map(function(element) {
+      factor(Bernoulli({p:component.params.p}).score(element))
+    }, component.elements)
+    
+  }, components)
+  
+  return {nComponents:components.length,
+          nElements:components.length==0 ? undefined : components[0].elements.length}
+})
+
+viz.marginals(dist)
