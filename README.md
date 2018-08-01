@@ -29,11 +29,3 @@ elements depend on their component's params, use factor to reweight the samples
 (see example below). Use the same technique if you want a different distribution
 for nComponents or nElements, e.g. a distribution with finite support. In this case
 you can use `unfactor=true` to automatically subtract their scores from the trace (see example).
-
-The function is written 'backwards', so that elements are sampled before being
-assigned to mixture components. This leads to single-site Metropolis-Hastings
-proposals which:
-  - Add a new element
-  - Remove any element
-  - Reassign an element to a new mixture component
-Factor statements reweight the trace to restore the semantics of the forward model
