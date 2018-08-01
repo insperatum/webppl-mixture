@@ -17,12 +17,13 @@ For each component:
    nElements ~ Geometric(pElements)
    elements = repeat(nElements, sampleElement)
 ```
-Returns a list of components as `[{params, elements}, ...]`
 
 Parameters:
 - `sampleParams` is a thunk which samples parameters for a mixture component
 - `sampleElement` is a thunk which samples an element
 - if `unfactor=true`, scores for nComponents and nElements are removed from trace
+
+Returns: a list of components as `[{params, elements}, ...]`
 
 All elements in all components are sampled i.i.d from sampleElement. To make
 elements depend on their component's params, use factor to reweight the samples
